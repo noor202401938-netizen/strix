@@ -27,6 +27,13 @@ Paste the servers you want into `~/.strix/mcp-servers.json`. The example below s
 ```json
 [
   {
+    "name": "cyberchef",
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "cyberchef-mcp"],
+    "notes": "CyberChef MCP server for multi-layer payload deobfuscation, crypto decoding, and entropy analysis."
+  },
+  {
     "name": "local_fs",
     "transport": "stdio",
     "command": "npx",
