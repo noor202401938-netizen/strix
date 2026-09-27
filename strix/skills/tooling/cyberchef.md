@@ -11,7 +11,7 @@ Official resources:
 - https://gchq.github.io/CyberChef/
 - https://modelcontextprotocol.io
 
-CyberChef provides over 500 data transformation and cryptographic operations. Connected via the Model Context Protocol (MCP) server `cyberchef`, it enables Strix agents to autonomously analyze, deobfuscate, unpack, and verify encoded exploit payloads, authorization tokens, and obfuscated attack vectors without manual intervention or guessing.
+CyberChef MCP provides 28 core data transformation, cryptographic, and forensic operations with zero external dependencies. Connected via the Model Context Protocol (MCP) server `cyberchef`, it enables Strix agents to autonomously analyze, deobfuscate, unpack, and verify encoded exploit payloads, authorization tokens, and obfuscated attack vectors with deterministic sub-millisecond execution.
 
 ## MCP Discovery & Dispatch Workflow
 
