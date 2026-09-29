@@ -28,6 +28,42 @@ _LOGIN_AS_GUEST_BODY = (
     '{"query":"mutation LoginAsGuest { loginAsGuest { token { accessToken } } }"}'
 )
 
+_PERMANENT_EXIT_CODES = frozenset({
+    2,  # curl: failed to initialize / bad command-line syntax
+    3,  # curl: malformed URL
+    126,  # command invoked cannot execute (permission denied)
+    127,  # command not found (curl is not installed in the sandbox image)
+})
+
+
+def _is_permanent_transport_error(exc: BaseException) -> bool:
+    """Return True if the sandbox transport has failed permanently and cannot recover."""
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+
+    if getattr(exc, "retryable", None) is False:
+        return True
+
+    try:
+        from agents.sandbox.errors import ExecTransportError, WorkspaceStopError
+
+        if isinstance(exc, WorkspaceStopError):
+            return True
+        if isinstance(exc, ExecTransportError) and not exc.context.get("retry_safe", False):
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from docker import errors as docker_errors  # type: ignore[import-untyped, unused-ignore]
+
+        if isinstance(exc, (docker_errors.NotFound, docker_errors.APIError)):
+            return True
+    except ImportError:
+        pass
+
+    return False
+
 
 def _extract_access_token(payload: Any) -> str | None:
     if not isinstance(payload, dict):
@@ -82,7 +118,11 @@ async def _login_as_guest(
                 f"{container_url}/graphql",
                 timeout=15,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
+            if _is_permanent_transport_error(exc):
+                raise RuntimeError(
+                    f"loginAsGuest failed permanently: session.exec failed: {exc}"
+                ) from exc
             last_err = f"session.exec failed: {exc}"
             logger.debug("loginAsGuest attempt %d/%d failed: %s", i, attempts, last_err)
             await asyncio.sleep(min(2.0 * i, 8.0))
@@ -99,6 +139,10 @@ async def _login_as_guest(
                 last_err = f"unparseable response: {exc}: {result.stdout!r}"
         else:
             stderr = _format_stderr(result.stderr)
+            if result.exit_code in _PERMANENT_EXIT_CODES:
+                raise RuntimeError(
+                    f"loginAsGuest failed permanently: curl exit {result.exit_code}: {stderr}"
+                )
             last_err = f"curl exit {result.exit_code}: {stderr}"
         logger.debug("loginAsGuest attempt %d/%d failed: %s", i, attempts, last_err)
         await asyncio.sleep(min(2.0 * i, 8.0))

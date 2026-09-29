@@ -13,10 +13,12 @@ import sys
 import types
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from agents.sandbox.errors import ExecTransportError, WorkspaceStopError
 
 from strix.runtime.caido_bootstrap import _login_as_guest, bootstrap_caido
 from strix.tools.proxy import caido_api
@@ -313,7 +315,24 @@ def test_caido_api_login_as_guest_http_500_with_graphql_error(
 
     monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=http_err))
 
-    with pytest.raises(RuntimeError, match="database locked"):
+    with pytest.raises(RuntimeError, match=r"HTTP 500.*database locked"):
+        caido_api._login_as_guest()
+
+
+def test_caido_api_login_as_guest_http_401_non_json_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    http_err = urllib.error.HTTPError(
+        url="http://127.0.0.1:8080/graphql",
+        code=401,
+        msg="Unauthorized",
+        hdrs={},  # type: ignore[arg-type]
+        fp=io.BytesIO(b"Unauthorized access"),
+    )
+
+    monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=http_err))
+
+    with pytest.raises(RuntimeError, match=r"HTTP 401.*Unauthorized access"):
         caido_api._login_as_guest()
 
 
@@ -325,4 +344,85 @@ def test_caido_api_login_as_guest_url_error(
 
     with pytest.raises(RuntimeError, match="Failed to connect to Caido"):
         caido_api._login_as_guest()
+
+
+async def test_login_as_guest_fails_promptly_on_permanent_transport_error() -> None:
+    class _PermanentTransportSession:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def exec(self, *_args: Any, **_kwargs: Any) -> _FakeExecResult:
+            self.call_count += 1
+            raise ExecTransportError(command=["curl"], message="Container gone", retryable=False)
+
+    session = _PermanentTransportSession()
+    with pytest.raises(
+        RuntimeError, match=r"loginAsGuest failed permanently.*session.exec failed"
+    ):
+        await _login_as_guest(
+            session,  # type: ignore[arg-type]
+            container_url="http://container",
+            attempts=10,
+        )
+    assert session.call_count == 1
+
+
+async def test_login_as_guest_fails_promptly_on_workspace_stop_error() -> None:
+    class _StoppedSession:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def exec(self, *_args: Any, **_kwargs: Any) -> _FakeExecResult:
+            self.call_count += 1
+            raise WorkspaceStopError(path=Path("/workspace"))
+
+    session = _StoppedSession()
+    with pytest.raises(
+        RuntimeError, match=r"loginAsGuest failed permanently.*session.exec failed"
+    ):
+        await _login_as_guest(
+            session,  # type: ignore[arg-type]
+            container_url="http://container",
+            attempts=10,
+        )
+    assert session.call_count == 1
+
+
+async def test_login_as_guest_fails_promptly_when_curl_not_found() -> None:
+    class _CurlNotFoundSession:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def exec(self, *_args: Any, **_kwargs: Any) -> _FakeExecResult:
+            self.call_count += 1
+            return _FakeExecResult("", stderr=b"/bin/sh: curl: not found", exit_code=127)
+
+    session = _CurlNotFoundSession()
+    with pytest.raises(RuntimeError, match="loginAsGuest failed permanently: curl exit 127"):
+        await _login_as_guest(
+            session,  # type: ignore[arg-type]
+            container_url="http://container",
+            attempts=10,
+        )
+    assert session.call_count == 1
+
+
+async def test_login_as_guest_fails_promptly_when_curl_permission_denied() -> None:
+    class _CurlPermissionDeniedSession:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def exec(self, *_args: Any, **_kwargs: Any) -> _FakeExecResult:
+            self.call_count += 1
+            return _FakeExecResult("", stderr=b"/bin/sh: curl: Permission denied", exit_code=126)
+
+    session = _CurlPermissionDeniedSession()
+    with pytest.raises(RuntimeError, match="loginAsGuest failed permanently: curl exit 126"):
+        await _login_as_guest(
+            session,  # type: ignore[arg-type]
+            container_url="http://container",
+            attempts=10,
+        )
+    assert session.call_count == 1
+
 

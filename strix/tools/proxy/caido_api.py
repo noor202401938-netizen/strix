@@ -80,7 +80,12 @@ def _login_as_guest() -> str:
         with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # nosec B310
             raw_resp = resp.read()
     except urllib.error.HTTPError as err:
-        raw_resp = err.read()
+        body = err.read()
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, TypeError):
+            payload = body.decode("utf-8", errors="replace")[:200].strip() or err.reason
+        raise RuntimeError(f"Caido loginAsGuest returned HTTP {err.code}: {payload}") from err
     except urllib.error.URLError as err:
         raise RuntimeError(f"Failed to connect to Caido at {_graphql_url()}: {err}") from err
 
