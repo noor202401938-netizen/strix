@@ -11,7 +11,7 @@ Official resources:
 - https://gchq.github.io/CyberChef/
 - https://modelcontextprotocol.io
 
-CyberChef MCP provides 28 core data transformation, cryptographic, and forensic operations with zero external dependencies. Connected via the Model Context Protocol (MCP) server `cyberchef`, it enables Strix agents to autonomously analyze, deobfuscate, unpack, and verify encoded exploit payloads, authorization tokens, and obfuscated attack vectors with deterministic sub-millisecond execution.
+CyberChef MCP provides 33 core data transformation, cryptographic, compression (Gunzip, Gzip, Zlib, Raw Deflate), and forensic operations with zero external dependencies. Connected via the Model Context Protocol (MCP) server `cyberchef`, it enables Strix agents to autonomously analyze, deobfuscate, unpack, and verify encoded exploit payloads, authorization tokens, and obfuscated attack vectors with deterministic sub-millisecond execution.
 
 ## MCP Discovery & Dispatch Workflow
 
@@ -74,8 +74,13 @@ For payloads with layered obfuscation (e.g. Hex inside Base64 inside URL-encoded
 }
 ```
 
-### 3. Entropy Assessment & Encoding Representation Calibration
-When evaluating whether a payload or parameter is encrypted, packed shellcode, or benign text, evaluate Shannon entropy through `call_mcp`:
+### 3. Entropy Assessment & Raw-Byte Workflow
+When evaluating whether a payload or parameter is encrypted, packed shellcode, or benign text, evaluate Shannon entropy through `call_mcp`.
+
+Depending on whether you are assessing an encoded representation directly or require true 8-bit raw-byte entropy, use one of the two workflows below:
+
+#### Workflow A: Direct Representation-Calibrated Entropy (`cyberchef_entropy`)
+Pass the encoded string (Hex or Base64) directly to `cyberchef_entropy` without prior decoding:
 ```json
 {
   "tool": "call_mcp",
@@ -88,6 +93,7 @@ When evaluating whether a payload or parameter is encrypted, packed shellcode, o
   }
 }
 ```
+`cyberchef_entropy` automatically detects the representation alphabet and returns `shannonEntropy`, `bitsPerChar`, `maxForAlphabet`, and `normalizedRatio` (saturation).
 
 > [!IMPORTANT]
 > **Calibrate entropy thresholds by input encoding representation:**
@@ -99,11 +105,51 @@ When evaluating whether a payload or parameter is encrypted, packed shellcode, o
 > - **Base64 Strings (64 characters, max 6.0 bits/char)**:
 >   - *Plain text Base64*: ~3.8 – 4.5
 >   - *High-entropy ciphertext / packed data*: **5.7 – 6.0** (Cannot exceed 6.0!)
-> - **Raw Binary / Decoded Byte Streams (256 values, max 8.0 bits/byte)**:
->   - *Plain text / uncompressed source code*: < 4.5
->   - *Compressed archives / packed code / encrypted shellcode*: > 7.2
->
-> **Best Practice**: Decode encoded representations (Hex, Base64) to raw bytes via `cyberchef_from_hex` or `cyberchef_from_base64` before evaluating raw Shannon entropy.
+> - **Normalized Saturation Rule**: If `normalizedRatio >= 0.85` (or `verdict == "encrypted_or_compressed"`), the payload is near-maximal entropy for its alphabet, indicating encryption, CSPRNG keys, or compressed data.
+
+#### Workflow B: Atomic Raw-Byte Entropy via `cyberchef_bake` (Recommended for Raw Binary Streams)
+To evaluate true 8-bit Shannon entropy (max 8.0 bits/byte) on an encoded payload (Base64 or Hex), execute the decode operation and entropy analysis **atomically** in a single `cyberchef_bake` recipe:
+```json
+{
+  "tool": "call_mcp",
+  "arguments": {
+    "connection": "cyberchef",
+    "tool": "cyberchef_bake",
+    "arguments": {
+      "input": "rLYFVVXj/6ydut5XjZodQFTcIX3qdGy5lS4CBmdY...",
+      "recipe": [
+        { "op": "From Base64" },
+        { "op": "Entropy" }
+      ]
+    }
+  }
+}
+```
+For Hex-encoded payloads:
+```json
+{
+  "tool": "call_mcp",
+  "arguments": {
+    "connection": "cyberchef",
+    "tool": "cyberchef_bake",
+    "arguments": {
+      "input": "4a8f1b9c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b...",
+      "recipe": [
+        { "op": "From Hex", "args": ["None"] },
+        { "op": "Entropy" }
+      ]
+    }
+  }
+}
+```
+This in-engine pipeline keeps raw decoded byte buffers in memory without serializing non-UTF-8 bytes across the JSON-RPC boundary. The returned entropy report uses the 8-bit raw alphabet (`maxForAlphabet: 8`):
+- **Raw Binary / Decoded Byte Streams (256 values, max 8.0 bits/byte)**:
+  - *Plain text / uncompressed source code*: < 4.5 bits/byte
+  - *Compressed archives / packed code / encrypted shellcode*: > 7.2 bits/byte
+
+> [!CAUTION]
+> **Do NOT attempt multi-turn raw byte passing across `call_mcp`:**
+> `call_mcp` transports inputs and outputs over JSON-RPC strings. Arbitrary 8-bit binary bytes (such as non-printable ciphertext or compressed streams) cannot be safely represented or transported across JSON-RPC without corruption (mojibake, Unicode replacement characters `\uFFFD`, or truncation). Never call `cyberchef_from_base64` or `cyberchef_from_hex` and then attempt to pass the resulting string to `cyberchef_entropy` in a second `call_mcp` call. Always use `cyberchef_bake` to chain decoding and entropy atomically, or evaluate representation-calibrated entropy directly on the encoded string via `cyberchef_entropy`.
 
 ## Common Security Analysis Patterns
 
@@ -125,9 +171,15 @@ When inspecting hardcoded binary strings, PowerShell scripts, or obfuscated malw
 1. Identify probable key length or common plaintext prefix (e.g., `MZ`, `http`, `function`).
 2. Run `call_mcp(connection="cyberchef", tool="cyberchef_xor", arguments={"input": data, "key": candidate_key})` iterating candidate keys to extract underlying C2 endpoints or script payloads.
 
+### Pattern 4: Encrypted / Compressed Payload & Entropy Classification
+When verifying whether an unknown string parameter is ciphertext, packed shellcode, or a high-entropy secret token:
+1. **Calibrated check**: Call `call_mcp(connection="cyberchef", tool="cyberchef_entropy", arguments={"input": candidate})`. Inspect `normalizedRatio` and `verdict`. If `normalizedRatio >= 0.85`, it is probable ciphertext or compressed data.
+2. **Raw-byte verification**: If strict 8-bit thresholds (> 7.2 bits/byte) are required, run `call_mcp(connection="cyberchef", tool="cyberchef_bake", arguments={"input": candidate, "recipe": [{"op": "From Base64"}, {"op": "Entropy"}]})` (or `From Hex`).
+
 ## Critical Correctness Rules
 
 - **Use `call_mcp` Dispatch**: Never attempt to call CyberChef tools directly as top-level agent tools. Always dispatch through `call_mcp(connection="cyberchef", tool="...", arguments={...})`.
+- **Atomic Raw-Byte Entropy Execution**: Never attempt to pass decoded raw binary bytes between separate `call_mcp` calls. JSON-RPC cannot transport arbitrary non-printable bytes without corruption. When evaluating raw byte entropy for Base64 or Hex payloads, always chain `From Base64`/`From Hex` and `Entropy` atomically in a single `cyberchef_bake` recipe.
 - **Do Not Guess Encodings**: If a string contains `=, %, 0x` or unexpected symbols, run `cyberchef_magic` first rather than blindly applying base64 or URL decoding.
 - **Preserve Raw Inputs**: Keep the original obfuscated string in agent memory/notes alongside the decoded output for accurate proof-of-concept (PoC) reporting.
 - **Fail-Safe Fallback**: If an operation fails during `cyberchef_bake`, isolate the failing recipe step and execute individual tools (`cyberchef_from_base64`, `cyberchef_url_decode`) sequentially via `call_mcp`.
